@@ -11,5 +11,4 @@ export type UpdateBotConfigRequestNetwork =
 
 export const UpdateBotConfigRequestNetwork = {
   mainnet: "mainnet",
-  testnet: "testnet",
 } as const;

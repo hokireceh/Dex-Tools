@@ -420,7 +420,7 @@ components:
           type: boolean
         network:
           type: string
-          enum: [mainnet, testnet]
+          enum: [mainnet]
         l1Address:
           type: string
           nullable: true
@@ -460,7 +460,7 @@ components:
           nullable: true
         network:
           type: string
-          enum: [mainnet, testnet]
+          enum: [mainnet]
         l1Address:
           type: string
           nullable: true
@@ -504,7 +504,7 @@ components:
           type: string
         type:
           type: string
-          enum: [dca, grid]
+          enum: [dca, grid, funding_arb]
         marketIndex:
           type: integer
         marketSymbol:
@@ -546,7 +546,7 @@ components:
           enum: [buy, sell]
         orderType:
           type: string
-          enum: [market, limit]
+          enum: [market, limit, post_only]
         limitPriceOffset:
           type: number
           nullable: true
@@ -571,7 +571,7 @@ components:
           enum: [neutral, long, short]
         orderType:
           type: string
-          enum: [market, limit]
+          enum: [market, limit, post_only]
         limitPriceOffset:
           type: number
           nullable: true
@@ -584,6 +584,36 @@ components:
           type: number
           nullable: true
           description: Take profit price - bot stops if price rises above this
+        executionMode:
+          type: string
+          enum: [aggressive, normal, passive]
+          nullable: true
+          description: Execution mode aggressiveness (aggressive=tight spread, passive=wide+post-only)
+        maxBudgetUsd:
+          type: number
+          nullable: true
+          description: Maximum budget cap in USD (null = unlimited)
+        inventorySkewEnabled:
+          type: boolean
+          nullable: true
+        inventorySkewThreshold:
+          type: number
+          nullable: true
+        inventorySkewMaxMult:
+          type: number
+          nullable: true
+        inventorySkewPauseAt:
+          type: number
+          nullable: true
+        followMarket:
+          type: boolean
+          nullable: true
+        followMarketTriggerPct:
+          type: number
+          nullable: true
+        followMarketMinIntervalMin:
+          type: number
+          nullable: true
       required: [lowerPrice, upperPrice, gridLevels, amountPerGrid, mode, orderType]
 
     StrategyStats:
@@ -605,6 +635,10 @@ components:
           type: number
         unrealizedPnl:
           type: number
+        sessionOrders:
+          type: integer
+          nullable: true
+          description: Orders count in current bot session (resets on bot start)
       required: [totalOrders, successfulOrders, totalBought, totalSold, realizedPnl, unrealizedPnl]
 
     CreateStrategyRequest:
@@ -614,7 +648,7 @@ components:
           type: string
         type:
           type: string
-          enum: [dca, grid]
+          enum: [dca, grid, funding_arb]
         marketIndex:
           type: integer
         dcaConfig:
@@ -623,7 +657,35 @@ components:
         gridConfig:
           $ref: "#/components/schemas/GridConfig"
           nullable: true
+        frArbConfig:
+          $ref: "#/components/schemas/FrArbConfig"
+          nullable: true
       required: [name, type, marketIndex]
+
+    FrArbConfig:
+      type: object
+      properties:
+        positionSize:
+          type: number
+        entryFrThreshold:
+          type: number
+        exitFrThreshold:
+          type: number
+        maxHoldHours:
+          type: number
+        side:
+          type: string
+          enum: [long, short, auto]
+        orderType:
+          type: string
+          enum: [market, limit, post_only]
+        limitPriceOffset:
+          type: number
+          nullable: true
+        stopLoss:
+          type: number
+          nullable: true
+      required: [positionSize, entryFrThreshold, exitFrThreshold, maxHoldHours, side, orderType]
 
     UpdateStrategyRequest:
       type: object
@@ -690,6 +752,10 @@ components:
             $ref: "#/components/schemas/Position"
         isConfigured:
           type: boolean
+        network:
+          type: string
+          nullable: true
+          description: Network identifier (e.g. mainnet)
       required: [isConfigured]
 
     Position:
@@ -753,6 +819,10 @@ components:
         orderHash:
           type: string
           nullable: true
+        exchange:
+          type: string
+          nullable: true
+          description: Exchange identifier (lighter, extended)
         clientOrderIndex:
           type: integer
           nullable: true

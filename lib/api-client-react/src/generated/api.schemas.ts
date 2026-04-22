@@ -64,7 +64,6 @@ export type BotConfigNetwork =
 
 export const BotConfigNetwork = {
   mainnet: "mainnet",
-  testnet: "testnet",
 } as const;
 
 export interface BotConfig {
@@ -87,7 +86,6 @@ export type UpdateBotConfigRequestNetwork =
 
 export const UpdateBotConfigRequestNetwork = {
   mainnet: "mainnet",
-  testnet: "testnet",
 } as const;
 
 export interface UpdateBotConfigRequest {
@@ -110,6 +108,7 @@ export type StrategyType = (typeof StrategyType)[keyof typeof StrategyType];
 export const StrategyType = {
   dca: "dca",
   grid: "grid",
+  funding_arb: "funding_arb",
 } as const;
 
 export type DcaConfigSide = (typeof DcaConfigSide)[keyof typeof DcaConfigSide];
@@ -159,6 +158,19 @@ export const GridConfigOrderType = {
   post_only: "post_only",
 } as const;
 
+/**
+ * Execution mode aggressiveness (aggressive=tight spread, passive=wide+post-only)
+ */
+export type GridConfigExecutionMode =
+  | (typeof GridConfigExecutionMode)[keyof typeof GridConfigExecutionMode]
+  | null;
+
+export const GridConfigExecutionMode = {
+  aggressive: "aggressive",
+  normal: "normal",
+  passive: "passive",
+} as const;
+
 export interface GridConfig {
   lowerPrice: number;
   upperPrice: number;
@@ -174,6 +186,17 @@ export interface GridConfig {
   stopLoss?: number | null;
   /** Take profit price - bot stops if price rises above this */
   takeProfit?: number | null;
+  /** Execution mode aggressiveness (aggressive=tight spread, passive=wide+post-only) */
+  executionMode?: GridConfigExecutionMode;
+  /** Maximum budget cap in USD (null = unlimited) */
+  maxBudgetUsd?: number | null;
+  inventorySkewEnabled?: boolean | null;
+  inventorySkewThreshold?: number | null;
+  inventorySkewMaxMult?: number | null;
+  inventorySkewPauseAt?: number | null;
+  followMarket?: boolean | null;
+  followMarketTriggerPct?: number | null;
+  followMarketMinIntervalMin?: number | null;
 }
 
 export interface StrategyStats {
@@ -185,6 +208,8 @@ export interface StrategyStats {
   avgSellPrice?: number;
   realizedPnl: number;
   unrealizedPnl: number;
+  /** Orders count in current bot session (resets on bot start) */
+  sessionOrders?: number | null;
 }
 
 export interface Strategy {
@@ -212,7 +237,37 @@ export type CreateStrategyRequestType =
 export const CreateStrategyRequestType = {
   dca: "dca",
   grid: "grid",
+  funding_arb: "funding_arb",
 } as const;
+
+export type FrArbConfigSide =
+  (typeof FrArbConfigSide)[keyof typeof FrArbConfigSide];
+
+export const FrArbConfigSide = {
+  long: "long",
+  short: "short",
+  auto: "auto",
+} as const;
+
+export type FrArbConfigOrderType =
+  (typeof FrArbConfigOrderType)[keyof typeof FrArbConfigOrderType];
+
+export const FrArbConfigOrderType = {
+  market: "market",
+  limit: "limit",
+  post_only: "post_only",
+} as const;
+
+export interface FrArbConfig {
+  positionSize: number;
+  entryFrThreshold: number;
+  exitFrThreshold: number;
+  maxHoldHours: number;
+  side: FrArbConfigSide;
+  orderType: FrArbConfigOrderType;
+  limitPriceOffset?: number | null;
+  stopLoss?: number | null;
+}
 
 export interface CreateStrategyRequest {
   name: string;
@@ -220,6 +275,7 @@ export interface CreateStrategyRequest {
   marketIndex: number;
   dcaConfig?: DcaConfig | null;
   gridConfig?: GridConfig | null;
+  frArbConfig?: FrArbConfig | null;
 }
 
 export interface UpdateStrategyRequest {
@@ -271,6 +327,8 @@ export interface AccountInfo {
   usedMargin?: number;
   positions?: Position[];
   isConfigured: boolean;
+  /** Network identifier (e.g. mainnet) */
+  network?: string | null;
 }
 
 export type TradeSide = (typeof TradeSide)[keyof typeof TradeSide];
@@ -301,6 +359,8 @@ export interface Trade {
   fee?: number;
   status: TradeStatus;
   orderHash?: string | null;
+  /** Exchange identifier (lighter, extended) */
+  exchange?: string | null;
   clientOrderIndex?: number | null;
   errorMessage?: string | null;
   executedAt?: string | null;

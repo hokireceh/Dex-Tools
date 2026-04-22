@@ -11,5 +11,4 @@ export type BotConfigNetwork =
 
 export const BotConfigNetwork = {
   mainnet: "mainnet",
-  testnet: "testnet",
 } as const;

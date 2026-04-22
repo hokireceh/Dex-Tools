@@ -12,4 +12,5 @@ export type CreateStrategyRequestType =
 export const CreateStrategyRequestType = {
   dca: "dca",
   grid: "grid",
+  funding_arb: "funding_arb",
 } as const;

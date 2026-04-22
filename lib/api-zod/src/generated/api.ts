@@ -87,7 +87,7 @@ export const GetBotConfigResponse = zod.object({
   accountIndex: zod.number().nullish(),
   apiKeyIndex: zod.number().nullish(),
   hasPrivateKey: zod.boolean(),
-  network: zod.enum(["mainnet", "testnet"]),
+  network: zod.enum(["mainnet"]),
   l1Address: zod.string().nullish(),
   notifyOnBuy: zod.boolean().nullish(),
   notifyOnSell: zod.boolean().nullish(),
@@ -105,7 +105,7 @@ export const UpdateBotConfigBody = zod.object({
   accountIndex: zod.number().nullish(),
   apiKeyIndex: zod.number().nullish(),
   privateKey: zod.string().nullish(),
-  network: zod.enum(["mainnet", "testnet"]).optional(),
+  network: zod.enum(["mainnet"]).optional(),
   l1Address: zod.string().nullish(),
   notifyBotToken: zod.string().nullish(),
   notifyChatId: zod.string().nullish(),
@@ -120,7 +120,7 @@ export const UpdateBotConfigResponse = zod.object({
   accountIndex: zod.number().nullish(),
   apiKeyIndex: zod.number().nullish(),
   hasPrivateKey: zod.boolean(),
-  network: zod.enum(["mainnet", "testnet"]),
+  network: zod.enum(["mainnet"]),
   l1Address: zod.string().nullish(),
   notifyOnBuy: zod.boolean().nullish(),
   notifyOnSell: zod.boolean().nullish(),
@@ -139,7 +139,7 @@ export const GetStrategiesResponse = zod.object({
     zod.object({
       id: zod.number(),
       name: zod.string(),
-      type: zod.enum(["dca", "grid"]),
+      type: zod.enum(["dca", "grid", "funding_arb"]),
       marketIndex: zod.number(),
       marketSymbol: zod.string(),
       isActive: zod.boolean(),
@@ -153,7 +153,7 @@ export const GetStrategiesResponse = zod.object({
             .nullish()
             .describe("Max number of orders (null = unlimited)"),
           side: zod.enum(["buy", "sell"]),
-          orderType: zod.enum(["market", "limit"]),
+          orderType: zod.enum(["market", "limit", "post_only"]),
           limitPriceOffset: zod
             .number()
             .nullish()
@@ -167,7 +167,7 @@ export const GetStrategiesResponse = zod.object({
           gridLevels: zod.number().describe("Number of grid levels"),
           amountPerGrid: zod.number().describe("USDC amount per grid level"),
           mode: zod.enum(["neutral", "long", "short"]),
-          orderType: zod.enum(["market", "limit"]),
+          orderType: zod.enum(["market", "limit", "post_only"]),
           limitPriceOffset: zod
             .number()
             .nullish()
@@ -182,6 +182,23 @@ export const GetStrategiesResponse = zod.object({
             .describe(
               "Take profit price - bot stops if price rises above this",
             ),
+          executionMode: zod
+            .enum(["aggressive", "normal", "passive"])
+            .nullish()
+            .describe(
+              "Execution mode aggressiveness (aggressive=tight spread, passive=wide+post-only)",
+            ),
+          maxBudgetUsd: zod
+            .number()
+            .nullish()
+            .describe("Maximum budget cap in USD (null = unlimited)"),
+          inventorySkewEnabled: zod.boolean().nullish(),
+          inventorySkewThreshold: zod.number().nullish(),
+          inventorySkewMaxMult: zod.number().nullish(),
+          inventorySkewPauseAt: zod.number().nullish(),
+          followMarket: zod.boolean().nullish(),
+          followMarketTriggerPct: zod.number().nullish(),
+          followMarketMinIntervalMin: zod.number().nullish(),
         })
         .nullish(),
       stats: zod
@@ -194,6 +211,12 @@ export const GetStrategiesResponse = zod.object({
           avgSellPrice: zod.number().optional(),
           realizedPnl: zod.number(),
           unrealizedPnl: zod.number(),
+          sessionOrders: zod
+            .number()
+            .nullish()
+            .describe(
+              "Orders count in current bot session (resets on bot start)",
+            ),
         })
         .nullish(),
       createdAt: zod.string(),
@@ -207,7 +230,7 @@ export const GetStrategiesResponse = zod.object({
  */
 export const CreateStrategyBody = zod.object({
   name: zod.string(),
-  type: zod.enum(["dca", "grid"]),
+  type: zod.enum(["dca", "grid", "funding_arb"]),
   marketIndex: zod.number(),
   dcaConfig: zod
     .object({
@@ -218,7 +241,7 @@ export const CreateStrategyBody = zod.object({
         .nullish()
         .describe("Max number of orders (null = unlimited)"),
       side: zod.enum(["buy", "sell"]),
-      orderType: zod.enum(["market", "limit"]),
+      orderType: zod.enum(["market", "limit", "post_only"]),
       limitPriceOffset: zod
         .number()
         .nullish()
@@ -232,7 +255,7 @@ export const CreateStrategyBody = zod.object({
       gridLevels: zod.number().describe("Number of grid levels"),
       amountPerGrid: zod.number().describe("USDC amount per grid level"),
       mode: zod.enum(["neutral", "long", "short"]),
-      orderType: zod.enum(["market", "limit"]),
+      orderType: zod.enum(["market", "limit", "post_only"]),
       limitPriceOffset: zod
         .number()
         .nullish()
@@ -245,6 +268,35 @@ export const CreateStrategyBody = zod.object({
         .number()
         .nullish()
         .describe("Take profit price - bot stops if price rises above this"),
+      executionMode: zod
+        .enum(["aggressive", "normal", "passive"])
+        .nullish()
+        .describe(
+          "Execution mode aggressiveness (aggressive=tight spread, passive=wide+post-only)",
+        ),
+      maxBudgetUsd: zod
+        .number()
+        .nullish()
+        .describe("Maximum budget cap in USD (null = unlimited)"),
+      inventorySkewEnabled: zod.boolean().nullish(),
+      inventorySkewThreshold: zod.number().nullish(),
+      inventorySkewMaxMult: zod.number().nullish(),
+      inventorySkewPauseAt: zod.number().nullish(),
+      followMarket: zod.boolean().nullish(),
+      followMarketTriggerPct: zod.number().nullish(),
+      followMarketMinIntervalMin: zod.number().nullish(),
+    })
+    .nullish(),
+  frArbConfig: zod
+    .object({
+      positionSize: zod.number(),
+      entryFrThreshold: zod.number(),
+      exitFrThreshold: zod.number(),
+      maxHoldHours: zod.number(),
+      side: zod.enum(["long", "short", "auto"]),
+      orderType: zod.enum(["market", "limit", "post_only"]),
+      limitPriceOffset: zod.number().nullish(),
+      stopLoss: zod.number().nullish(),
     })
     .nullish(),
 });
@@ -268,7 +320,7 @@ export const UpdateStrategyBody = zod.object({
         .nullish()
         .describe("Max number of orders (null = unlimited)"),
       side: zod.enum(["buy", "sell"]),
-      orderType: zod.enum(["market", "limit"]),
+      orderType: zod.enum(["market", "limit", "post_only"]),
       limitPriceOffset: zod
         .number()
         .nullish()
@@ -282,7 +334,7 @@ export const UpdateStrategyBody = zod.object({
       gridLevels: zod.number().describe("Number of grid levels"),
       amountPerGrid: zod.number().describe("USDC amount per grid level"),
       mode: zod.enum(["neutral", "long", "short"]),
-      orderType: zod.enum(["market", "limit"]),
+      orderType: zod.enum(["market", "limit", "post_only"]),
       limitPriceOffset: zod
         .number()
         .nullish()
@@ -295,6 +347,23 @@ export const UpdateStrategyBody = zod.object({
         .number()
         .nullish()
         .describe("Take profit price - bot stops if price rises above this"),
+      executionMode: zod
+        .enum(["aggressive", "normal", "passive"])
+        .nullish()
+        .describe(
+          "Execution mode aggressiveness (aggressive=tight spread, passive=wide+post-only)",
+        ),
+      maxBudgetUsd: zod
+        .number()
+        .nullish()
+        .describe("Maximum budget cap in USD (null = unlimited)"),
+      inventorySkewEnabled: zod.boolean().nullish(),
+      inventorySkewThreshold: zod.number().nullish(),
+      inventorySkewMaxMult: zod.number().nullish(),
+      inventorySkewPauseAt: zod.number().nullish(),
+      followMarket: zod.boolean().nullish(),
+      followMarketTriggerPct: zod.number().nullish(),
+      followMarketMinIntervalMin: zod.number().nullish(),
     })
     .nullish(),
 });
@@ -302,7 +371,7 @@ export const UpdateStrategyBody = zod.object({
 export const UpdateStrategyResponse = zod.object({
   id: zod.number(),
   name: zod.string(),
-  type: zod.enum(["dca", "grid"]),
+  type: zod.enum(["dca", "grid", "funding_arb"]),
   marketIndex: zod.number(),
   marketSymbol: zod.string(),
   isActive: zod.boolean(),
@@ -316,7 +385,7 @@ export const UpdateStrategyResponse = zod.object({
         .nullish()
         .describe("Max number of orders (null = unlimited)"),
       side: zod.enum(["buy", "sell"]),
-      orderType: zod.enum(["market", "limit"]),
+      orderType: zod.enum(["market", "limit", "post_only"]),
       limitPriceOffset: zod
         .number()
         .nullish()
@@ -330,7 +399,7 @@ export const UpdateStrategyResponse = zod.object({
       gridLevels: zod.number().describe("Number of grid levels"),
       amountPerGrid: zod.number().describe("USDC amount per grid level"),
       mode: zod.enum(["neutral", "long", "short"]),
-      orderType: zod.enum(["market", "limit"]),
+      orderType: zod.enum(["market", "limit", "post_only"]),
       limitPriceOffset: zod
         .number()
         .nullish()
@@ -343,6 +412,23 @@ export const UpdateStrategyResponse = zod.object({
         .number()
         .nullish()
         .describe("Take profit price - bot stops if price rises above this"),
+      executionMode: zod
+        .enum(["aggressive", "normal", "passive"])
+        .nullish()
+        .describe(
+          "Execution mode aggressiveness (aggressive=tight spread, passive=wide+post-only)",
+        ),
+      maxBudgetUsd: zod
+        .number()
+        .nullish()
+        .describe("Maximum budget cap in USD (null = unlimited)"),
+      inventorySkewEnabled: zod.boolean().nullish(),
+      inventorySkewThreshold: zod.number().nullish(),
+      inventorySkewMaxMult: zod.number().nullish(),
+      inventorySkewPauseAt: zod.number().nullish(),
+      followMarket: zod.boolean().nullish(),
+      followMarketTriggerPct: zod.number().nullish(),
+      followMarketMinIntervalMin: zod.number().nullish(),
     })
     .nullish(),
   stats: zod
@@ -355,6 +441,10 @@ export const UpdateStrategyResponse = zod.object({
       avgSellPrice: zod.number().optional(),
       realizedPnl: zod.number(),
       unrealizedPnl: zod.number(),
+      sessionOrders: zod
+        .number()
+        .nullish()
+        .describe("Orders count in current bot session (resets on bot start)"),
     })
     .nullish(),
   createdAt: zod.string(),
@@ -439,6 +529,7 @@ export const GetAccountInfoResponse = zod.object({
     )
     .optional(),
   isConfigured: zod.boolean(),
+  network: zod.string().nullish().describe("Network identifier (e.g. mainnet)"),
 });
 
 /**
@@ -465,6 +556,10 @@ export const GetTradeHistoryResponse = zod.object({
       fee: zod.number().optional(),
       status: zod.enum(["pending", "filled", "cancelled", "failed"]),
       orderHash: zod.string().nullish(),
+      exchange: zod
+        .string()
+        .nullish()
+        .describe("Exchange identifier (lighter, extended)"),
       clientOrderIndex: zod.number().nullish(),
       errorMessage: zod.string().nullish(),
       executedAt: zod.string().nullish(),

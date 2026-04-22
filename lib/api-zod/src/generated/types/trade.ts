@@ -20,6 +20,8 @@ export interface Trade {
   fee?: number;
   status: TradeStatus;
   orderHash?: string | null;
+  /** Exchange identifier (lighter, extended) */
+  exchange?: string | null;
   clientOrderIndex?: number | null;
   errorMessage?: string | null;
   executedAt?: string | null;

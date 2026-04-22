@@ -15,4 +15,6 @@ export interface AccountInfo {
   usedMargin?: number;
   positions?: Position[];
   isConfigured: boolean;
+  /** Network identifier (e.g. mainnet) */
+  network?: string | null;
 }

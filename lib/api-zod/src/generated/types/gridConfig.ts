@@ -5,6 +5,7 @@
  * Lighter Trading Bot API
  * OpenAPI spec version: 0.1.0
  */
+import type { GridConfigExecutionMode } from "./gridConfigExecutionMode";
 import type { GridConfigMode } from "./gridConfigMode";
 import type { GridConfigOrderType } from "./gridConfigOrderType";
 
@@ -23,4 +24,15 @@ export interface GridConfig {
   stopLoss?: number | null;
   /** Take profit price - bot stops if price rises above this */
   takeProfit?: number | null;
+  /** Execution mode aggressiveness (aggressive=tight spread, passive=wide+post-only) */
+  executionMode?: GridConfigExecutionMode;
+  /** Maximum budget cap in USD (null = unlimited) */
+  maxBudgetUsd?: number | null;
+  inventorySkewEnabled?: boolean | null;
+  inventorySkewThreshold?: number | null;
+  inventorySkewMaxMult?: number | null;
+  inventorySkewPauseAt?: number | null;
+  followMarket?: boolean | null;
+  followMarketTriggerPct?: number | null;
+  followMarketMinIntervalMin?: number | null;
 }

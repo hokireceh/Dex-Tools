@@ -11,4 +11,5 @@ export type StrategyType = (typeof StrategyType)[keyof typeof StrategyType];
 export const StrategyType = {
   dca: "dca",
   grid: "grid",
+  funding_arb: "funding_arb",
 } as const;

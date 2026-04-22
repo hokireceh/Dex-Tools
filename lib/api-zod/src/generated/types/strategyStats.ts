@@ -15,4 +15,6 @@ export interface StrategyStats {
   avgSellPrice?: number;
   realizedPnl: number;
   unrealizedPnl: number;
+  /** Orders count in current bot session (resets on bot start) */
+  sessionOrders?: number | null;
 }

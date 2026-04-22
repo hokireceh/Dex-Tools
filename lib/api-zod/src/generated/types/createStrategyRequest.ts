@@ -7,6 +7,7 @@
  */
 import type { CreateStrategyRequestType } from "./createStrategyRequestType";
 import type { DcaConfig } from "./dcaConfig";
+import type { FrArbConfig } from "./frArbConfig";
 import type { GridConfig } from "./gridConfig";
 
 export interface CreateStrategyRequest {
@@ -15,4 +16,5 @@ export interface CreateStrategyRequest {
   marketIndex: number;
   dcaConfig?: DcaConfig | null;
   gridConfig?: GridConfig | null;
+  frArbConfig?: FrArbConfig | null;
 }
