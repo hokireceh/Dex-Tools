@@ -14,7 +14,7 @@
 ### Backend — `artifacts/api-server/src/`
 - `app.ts`, `index.ts`
 - `middlewares/auth.ts`
-- `routes/` — semua file termasuk sub-folder lighter, extended, ethereal
+- `routes/` — semua file termasuk sub-folder lighter
 - `lib/lighter/` — lighterApi, lighterBotEngine, lighterSigner, lighterWs, marketCache
 - `lib/` — autoRerange, groqAI, smartBroadcaster, telegramBot, logger, utils, encrypt, sessionStore, neonBroadcastDb
 - `lib/shared/tolerance.ts`
