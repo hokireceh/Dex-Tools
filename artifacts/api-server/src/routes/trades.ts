@@ -5,7 +5,7 @@ import { desc, eq, and } from "drizzle-orm";
 import { authMiddleware, type AuthRequest } from "../middlewares/auth";
 
 const router = Router();
-router.use(authMiddleware as any);
+router.use(authMiddleware);
 
 router.get("/", async (req: AuthRequest, res) => {
   const strategyId = req.query.strategyId ? parseInt(String(req.query.strategyId)) : undefined;
@@ -29,15 +29,16 @@ router.get("/", async (req: AuthRequest, res) => {
         marketIndex: t.marketIndex,
         marketSymbol: t.marketSymbol,
         side: t.side,
-        size: parseFloat(String(t.size)),
-        price: parseFloat(String(t.price)),
-        fee: parseFloat(String(t.fee)),
+        size: t.size != null ? String(t.size) : undefined,
+        price: t.price != null ? String(t.price) : undefined,
+        fee: t.fee != null ? String(t.fee) : undefined,
         status: t.status,
         orderHash: t.orderHash ?? null,
         clientOrderIndex: t.clientOrderIndex ?? null,
         errorMessage: t.errorMessage ?? null,
         executedAt: t.executedAt?.toISOString() ?? null,
         createdAt: t.createdAt.toISOString(),
+        exchange: (t.exchange ?? "lighter") as "lighter" | "extended",
       })),
       total: trades.length,
     });

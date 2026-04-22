@@ -14,7 +14,10 @@ export const logger = pino({
     : {
         transport: {
           target: "pino-pretty",
-          options: { colorize: true },
+          options: {
+            colorize: true,
+            translateTime: "Asia/Jakarta:yyyy-mm-dd HH:MM:ss",
+          },
         },
       }),
 });

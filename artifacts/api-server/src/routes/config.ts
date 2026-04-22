@@ -1,21 +1,24 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { strategiesTable } from "@workspace/db";
-import { eq, and } from "drizzle-orm";
-import { getBotConfig, updateBotConfig } from "./configService";
-import { stopBot } from "../lib/botEngine";
-import { getMarketSymbol } from "../lib/marketCache";
+import { strategiesTable, tradesTable, GridConfig, type FrArbConfig } from "@workspace/db";
+import { eq, and, gte, sql } from "drizzle-orm";
+import { getBotConfig, updateBotConfig, getExtendedCredentials } from "./configService";
+import { stopBot, isRunning as isLighterBotRunning, getSessionStartedAt } from "../lib/lighter/lighterBotEngine";
+import { getMarketSymbol } from "../lib/lighter/marketCache";
 import { authMiddleware, type AuthRequest } from "../middlewares/auth";
-import { getAccountByL1Address, getNextNonce, sendTx, getBaseUrl } from "../lib/lighterApi";
-import { generateApiKey, initSigner, signChangePubKey, isSignerAvailable } from "../lib/lighterSigner";
+import { getAccountByL1Address, getNextNonce, sendTx, getBaseUrl } from "../lib/lighter/lighterApi";
+import { generateApiKey, initSigner, signChangePubKey, isSignerAvailable } from "../lib/lighter/lighterSigner";
 import { sendMessageToUser } from "../lib/telegramBot";
 
 const router = Router();
-router.use(authMiddleware as any);
+router.use(authMiddleware);
 
 router.get("/", async (req: AuthRequest, res) => {
   try {
-    const config = await getBotConfig(req.userId!);
+    const [config, extCreds] = await Promise.all([
+      getBotConfig(req.userId!),
+      getExtendedCredentials(req.userId!).catch(() => null),
+    ]);
     res.json({
       accountIndex: config.accountIndex,
       apiKeyIndex: config.apiKeyIndex,
@@ -29,6 +32,9 @@ router.get("/", async (req: AuthRequest, res) => {
       notifyOnStop: config.notifyOnStop,
       hasNotifyBotToken: config.hasNotifyBotToken,
       notifyChatId: config.notifyChatId,
+      hasLighterReadonlyToken: !!(config.lighterReadonlyToken),
+      hasExtCredentials: extCreds?.hasCredentials ?? false,
+      extendedNetwork: extCreds?.extendedNetwork ?? "mainnet",
     });
   } catch (err) {
     req.log.error({ err }, "Failed to get bot config");
@@ -59,7 +65,7 @@ router.put("/", async (req: AuthRequest, res) => {
       accountIndex?: number | null;
       apiKeyIndex?: number | null;
       privateKey?: string | null;
-      network?: "mainnet" | "testnet";
+      network?: "mainnet";
       l1Address?: string | null;
       notifyOnBuy?: boolean | null;
       notifyOnSell?: boolean | null;
@@ -68,6 +74,7 @@ router.put("/", async (req: AuthRequest, res) => {
       notifyOnStop?: boolean | null;
       notifyBotToken?: string | null;
       notifyChatId?: string | null;
+      lighterReadonlyToken?: string | null;
     };
 
     const config = await updateBotConfig(req.userId!, body);
@@ -85,6 +92,7 @@ router.put("/", async (req: AuthRequest, res) => {
       notifyOnStop: config.notifyOnStop,
       hasNotifyBotToken: config.hasNotifyBotToken,
       notifyChatId: config.notifyChatId,
+      hasLighterReadonlyToken: !!(config.lighterReadonlyToken),
     });
   } catch (err) {
     req.log.error({ err }, "Failed to update bot config");
@@ -95,9 +103,34 @@ router.put("/", async (req: AuthRequest, res) => {
 router.get("/strategies", async (req: AuthRequest, res) => {
   try {
     const strategies = await db.query.strategiesTable.findMany({
-      where: eq(strategiesTable.userId, req.userId!),
+      where: and(
+        eq(strategiesTable.userId, req.userId!),
+        eq(strategiesTable.exchange, "lighter")
+      ),
       orderBy: (s, { desc }) => [desc(s.createdAt)],
     });
+
+    // STRAT-SESSION-ORDERS-SERIALIZER-001: hitung sessionOrders per strategy yang sedang running.
+    // FE pakai field ini saat isRunning untuk progress bar maxOrders cap (per-session, mirror
+    // logika MAXORDERS-001 di engine). Strategy yang tidak running → sessionOrders=null,
+    // FE fallback ke totalOrders kumulatif untuk display lifetime.
+    const sessionOrdersMap = new Map<number, number>();
+    await Promise.all(
+      strategies
+        .map((s) => ({ id: s.id, startedAt: getSessionStartedAt(s.id) }))
+        .filter((x): x is { id: number; startedAt: Date } => x.startedAt !== null)
+        .map(async ({ id, startedAt }) => {
+          const filledResult = await db
+            .select({ count: sql<number>`cast(count(*) as int)` })
+            .from(tradesTable)
+            .where(and(
+              eq(tradesTable.strategyId, id),
+              eq(tradesTable.status, "filled"),
+              gte(tradesTable.createdAt, startedAt),
+            ));
+          sessionOrdersMap.set(id, filledResult[0]?.count ?? 0);
+        })
+    );
 
     const result = strategies.map((s) => ({
       id: s.id,
@@ -107,10 +140,10 @@ router.get("/strategies", async (req: AuthRequest, res) => {
       marketSymbol: s.marketSymbol,
       isActive: s.isActive,
       isRunning: s.isRunning,
-      dcaConfig: s.dcaConfig ?? null,
       gridConfig: s.gridConfig ?? null,
       stats: {
         totalOrders: s.totalOrders,
+        sessionOrders: sessionOrdersMap.get(s.id) ?? null,
         successfulOrders: s.successfulOrders,
         totalBought: parseFloat(String(s.totalBought)),
         totalSold: parseFloat(String(s.totalSold)),
@@ -134,57 +167,18 @@ router.post("/strategies", async (req: AuthRequest, res) => {
   try {
     const body = req.body as {
       name: string;
-      type: "dca" | "grid";
+      type: "grid" | "funding_arb";
       marketIndex: number;
-      dcaConfig?: object;
-      gridConfig?: object;
+      gridConfig?: GridConfig;
+      frArbConfig?: FrArbConfig;
     };
 
-    if (body.type === "grid" && !body.gridConfig) {
-      return res.status(400).json({ error: "gridConfig is required for grid strategy", field: "gridConfig" });
+    if (body.type !== "grid" && body.type !== "funding_arb") {
+      return res.status(400).json({ error: `Tipe strategy '${body.type}' tidak didukung di Lighter` });
     }
 
-    // Validate gridConfig when type is "grid"
-    if (body.type === "grid" && body.gridConfig) {
-      const g = body.gridConfig as Record<string, unknown>;
-      const gridLevels = Number(g["gridLevels"]);
-      const lowerPrice = Number(g["lowerPrice"]);
-      const upperPrice = Number(g["upperPrice"]);
-      const investmentAmount = Number(g["investmentAmount"]);
-
-      if (!Number.isFinite(gridLevels) || gridLevels < 2) {
-        return res.status(400).json({ error: "gridLevels must be at least 2", field: "gridLevels" });
-      }
-      if (!Number.isFinite(lowerPrice) || lowerPrice <= 0) {
-        return res.status(400).json({ error: "lowerPrice must be greater than 0", field: "lowerPrice" });
-      }
-      if (!Number.isFinite(upperPrice) || upperPrice <= lowerPrice) {
-        return res.status(400).json({ error: "upperPrice must be greater than lowerPrice", field: "upperPrice" });
-      }
-      if (!Number.isFinite(investmentAmount) || investmentAmount <= 0) {
-        return res.status(400).json({ error: "investmentAmount must be greater than 0", field: "investmentAmount" });
-      }
-    }
-
-    // Validate dcaConfig when type is "dca"
-    if (body.type === "dca") {
-      if (!body.dcaConfig) {
-        return res.status(400).json({ error: "dcaConfig is required for dca strategy", field: "dcaConfig" });
-      }
-      const d = body.dcaConfig as Record<string, unknown>;
-      const amountPerOrder = Number(d["amountPerOrder"]);
-      const intervalMinutes = Number(d["intervalMinutes"]);
-      const side = d["side"];
-
-      if (!Number.isFinite(amountPerOrder) || amountPerOrder <= 0) {
-        return res.status(400).json({ error: "amountPerOrder must be greater than 0", field: "amountPerOrder" });
-      }
-      if (!Number.isFinite(intervalMinutes) || intervalMinutes < 1) {
-        return res.status(400).json({ error: "intervalMinutes must be at least 1", field: "intervalMinutes" });
-      }
-      if (side !== "buy" && side !== "sell") {
-        return res.status(400).json({ error: "side must be 'buy' or 'sell'", field: "side" });
-      }
+    if (body.type === "funding_arb" && !body.frArbConfig) {
+      return res.status(400).json({ error: "frArbConfig diperlukan untuk tipe funding_arb" });
     }
 
     const config = await getBotConfig(req.userId!);
@@ -196,8 +190,8 @@ router.post("/strategies", async (req: AuthRequest, res) => {
       type: body.type,
       marketIndex: body.marketIndex,
       marketSymbol,
-      dcaConfig: body.dcaConfig ?? null,
       gridConfig: body.gridConfig ?? null,
+      frArbConfig: body.frArbConfig ?? null,
     }).returning();
 
     res.status(201).json({
@@ -208,8 +202,8 @@ router.post("/strategies", async (req: AuthRequest, res) => {
       marketSymbol: strategy.marketSymbol,
       isActive: strategy.isActive,
       isRunning: strategy.isRunning,
-      dcaConfig: strategy.dcaConfig ?? null,
       gridConfig: strategy.gridConfig ?? null,
+      frArbConfig: strategy.frArbConfig ?? null,
       stats: null,
       createdAt: strategy.createdAt.toISOString(),
       updatedAt: strategy.updatedAt.toISOString(),
@@ -226,20 +220,28 @@ router.put("/strategies/:id", async (req: AuthRequest, res) => {
     const body = req.body as {
       name?: string;
       isActive?: boolean;
-      dcaConfig?: object;
-      gridConfig?: object;
+      gridConfig?: GridConfig;
     };
 
     const existing = await db.query.strategiesTable.findFirst({
-      where: and(eq(strategiesTable.id, id), eq(strategiesTable.userId, req.userId!)),
+      where: and(
+        eq(strategiesTable.id, id),
+        eq(strategiesTable.userId, req.userId!),
+        eq(strategiesTable.exchange, "lighter")
+      ),
     });
     if (!existing) return res.status(404).json({ error: "Strategy not found" });
+
+    // BUG-EDIT-001: Blokir edit jika bot sedang berjalan — konsisten dengan Extended.
+    // Gunakan in-memory check agar akurat meski DB stale.
+    if (isLighterBotRunning(id)) {
+      return res.status(409).json({ error: "Hentikan bot sebelum mengubah strategy" });
+    }
 
     const [updated] = await db.update(strategiesTable)
       .set({
         ...(body.name !== undefined && { name: body.name }),
         ...(body.isActive !== undefined && { isActive: body.isActive }),
-        ...(body.dcaConfig !== undefined && { dcaConfig: body.dcaConfig }),
         ...(body.gridConfig !== undefined && { gridConfig: body.gridConfig }),
         updatedAt: new Date(),
       })
@@ -254,7 +256,6 @@ router.put("/strategies/:id", async (req: AuthRequest, res) => {
       marketSymbol: updated.marketSymbol,
       isActive: updated.isActive,
       isRunning: updated.isRunning,
-      dcaConfig: updated.dcaConfig ?? null,
       gridConfig: updated.gridConfig ?? null,
       stats: null,
       createdAt: updated.createdAt.toISOString(),
@@ -314,10 +315,15 @@ router.post("/change-pub-key/prepare", async (req: AuthRequest, res) => {
     const network = config.network;
     const url = getBaseUrl(network);
 
-    // Initialize signer with the NEW private key
-    initSigner(url, newPrivateKey, apiKeyIndex, config.accountIndex);
-
+    // CONFIG-SIGNER-RACE-001: getNextNonce dipanggil SEBELUM initSigner(newKey).
+    // Jika initSigner dipanggil dulu, bot tick yang berjalan selama await getNextNonce
+    // akan menggunakan key baru yang belum terdaftar on-chain → order signing gagal.
+    // Pattern ini sama dengan LIGHTER-SIGNER-RACE-001 di lighterBotEngine.ts.
     const nonce = await getNextNonce(config.accountIndex, apiKeyIndex, network);
+
+    // initSigner setelah nonce diperoleh — tidak ada await antara initSigner dan signChangePubKey
+    // sehingga tidak ada window di mana bot tick bisa menyela.
+    initSigner(url, newPrivateKey, apiKeyIndex, config.accountIndex);
 
     const signResult = signChangePubKey({
       url,
@@ -390,7 +396,7 @@ router.post("/test-notification", async (req: AuthRequest, res) => {
     }
     const result = await sendMessageToUser(
       config.notifyChatId,
-      `🔔 *Test Notifikasi LighterBot*\n\nKonfigurasi Telegram kamu berhasil terhubung!\nKamu akan menerima notifikasi trading di sini.`,
+      `🔔 *Test Notifikasi Sepi Bukan Sapi*\n\nKonfigurasi Telegram kamu berhasil terhubung!\nKamu akan menerima notifikasi trading di sini.`,
       config.notifyBotToken
     );
     if (result.ok) {
@@ -409,11 +415,17 @@ router.delete("/strategies/:id", async (req: AuthRequest, res) => {
   const id = parseInt(String(req.params.id));
   try {
     const existing = await db.query.strategiesTable.findFirst({
-      where: and(eq(strategiesTable.id, id), eq(strategiesTable.userId, req.userId!)),
+      where: and(
+        eq(strategiesTable.id, id),
+        eq(strategiesTable.userId, req.userId!),
+        eq(strategiesTable.exchange, "lighter")
+      ),
     });
     if (!existing) return res.status(404).json({ error: "Strategy not found" });
 
-    if (existing.isRunning) {
+    // BUG-EDIT-003: Ganti DB check ke in-memory check — DB bisa stale jika crash.
+    // Jika bot sedang running di memori tapi DB bilang false, bot akan terus jalan meski strategy sudah dihapus.
+    if (isLighterBotRunning(id)) {
       await stopBot(id);
     }
 

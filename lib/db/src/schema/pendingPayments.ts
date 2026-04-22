@@ -15,6 +15,10 @@ export const pendingPaymentsTable = pgTable("pending_payments", {
   waitingMsgId: integer("waiting_msg_id"),
   expiresAt: timestamp("expires_at").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  status: text("status").notNull().default("pending"),
+  retryCount: integer("retry_count").notNull().default(0),
+  lastCheckedAt: timestamp("last_checked_at"),
+  lastSaweriaResponse: text("last_saweria_response"),
 });
 
 export const insertPendingPaymentSchema = createInsertSchema(pendingPaymentsTable);

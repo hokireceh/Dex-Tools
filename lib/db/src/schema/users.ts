@@ -12,6 +12,10 @@ export const usersTable = pgTable("users", {
   plan: text("plan").notNull(),
   expiresAt: timestamp("expires_at").notNull(),
   isActive: boolean("is_active").default(true).notNull(),
+  extendedApiKey: text("extended_api_key"),
+  extendedStarkPrivateKey: text("extended_stark_private_key"),
+  extendedStarkPublicKey: text("extended_stark_public_key"),
+  extendedAccountId: text("extended_account_id"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 });

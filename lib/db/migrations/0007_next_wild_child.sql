@@ -1,0 +1,1 @@
+CREATE INDEX "strategies_is_running_exchange_idx" ON "strategies" USING btree ("is_running","exchange");

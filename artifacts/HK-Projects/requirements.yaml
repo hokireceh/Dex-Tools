@@ -1,0 +1,17 @@
+packages:
+  "framer-motion": "For smooth layout transitions and modal animations"
+  "recharts": "For visualizing PnL and order books"
+  "date-fns": "For formatting timestamps in logs and trade history"
+  "react-hook-form": "For robust strategy configuration forms"
+  "@hookform/resolvers": "For Zod validation integration"
+  "zod": "For client-side schema validation matching OpenAPI"
+
+images:
+  - path: "artifacts/HK-Projects/public/images/hero-bg.png"
+    description: "Abstract dark mode geometric mesh with subtle blue and green cyber glowing lines, perfect for a high-tech crypto trading terminal background"
+    aspect_ratio: "16:9"
+
+notes:
+  - "Assumes standard shadcn UI components exist in @/components/ui/"
+  - "Using React Query hooks from @workspace/api-client-react as specified"
+  - "App defaults to a dark terminal theme for a professional trading experience"
