@@ -47,9 +47,13 @@ LighterBot adalah automated trading bot system untuk **Lighter.xyz** dan **Exten
 2. **Fetch sumber resmi DEX** yang relevan sebelum menilai implementasi.
 3. **Setiap sesi**: lapor maksimal 5 issue teratas by priority. Catat sisa temuan untuk sesi berikutnya.
 4. **Satu issue = satu propose = satu approval.** Jangan bundling beberapa fix sekaligus.
+   - **Override:** Jika user secara eksplisit memerintahkan "fix all" atau "jalankan semua fix", terapkan semua fix sekaligus tanpa menunggu approval per-issue. `tsc --noEmit` harus bersih setelah setiap fix.
 5. Jika menemukan issue tambahan saat membaca file, catat — jangan fix tanpa lapor dulu.
 6. Di akhir sesi, output **carry-over list** untuk sesi berikutnya.
-7. **Tunggu approval** sebelum menyentuh kode apapun.
+7. **Tunggu approval** sebelum menyentuh kode apapun (kecuali override point 4 aktif).
+8. **`tsc --noEmit` wajib bersih** setelah setiap perubahan kode. Jika ada error TypeScript, perbaiki sebelum lanjut.
+9. **Tidak ada "by design" dismissal** — setiap anomali harus dianalisis dan didokumentasikan, bahkan jika akhirnya diklasifikasikan sebagai intentional.
+10. **Jika SKILL.md atau db-schema.md tidak mencakup sesuatu**, update file tersebut di akhir sesi.
 
 ## Severity Classification
 

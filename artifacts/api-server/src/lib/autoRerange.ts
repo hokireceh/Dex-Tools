@@ -344,6 +344,10 @@ export async function applyApprovedRerangeParams(
     // pasca rerange. Level lama (dari range lama) tidak sebanding dengan level baru (range baru)
     // karena gridSpacing berubah — menyimpannya bisa trigger false crossing.
     gridLastLevel: null,
+    // AUDIT-BUDGET-001: Reset budgetSpentUsd saat rerange disetujui — rerange = sesi grid baru.
+    // Tanpa reset: counter terus akumulasi lintas sesi rerange → bot bisa berhenti prematur
+    // setelah rerange meski user sudah mengubah range grid (niat "mulai ulang").
+    budgetSpentUsd: "0",
     updatedAt: new Date(),
   }).where(eq(strategiesTable.id, strategyId));
 }

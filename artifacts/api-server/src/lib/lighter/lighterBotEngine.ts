@@ -4,7 +4,8 @@ import { eq, desc, lt, sql, and, isNotNull, ne, gte, lte, inArray } from "drizzl
 import Decimal from "decimal.js";
 import { logger } from "../logger";
 import { getBotConfig, getNotificationConfig } from "../../routes/configService";
-import { getNextNonce, sendTx, sendTxBatch, toBaseAmount, toPriceInt, getTx, getBaseUrl, fetchAccountActiveOrders, getAccountByIndex, type Network } from "./lighterApi";
+import { sendTx, sendTxBatch, toBaseAmount, toPriceInt, getTx, getBaseUrl, fetchAccountActiveOrders, getAccountByIndex, type Network } from "./lighterApi";
+import { nextClientOrderIndex, acquireNonce, invalidateNonceCache, shouldInvalidateNonce, enqueueOrphanCancel, waitForOrphanCancels } from "./nonceManager";
 import { getMarketInfo, fetchLiveMarketInfo } from "./marketCache";
 import { initSigner, signCreateOrder, signCancelOrder } from "./lighterSigner";
 import { sendMessageToUser, formatBotStarted, formatBotStopped, formatOrderFilled,
@@ -51,114 +52,8 @@ async function getCachedAccountType(accountIndex: number, network: Network): Pro
   }
 }
 
-// ─── ATOMIC CLIENT ORDER INDEX COUNTER ──────────────────────────────────────
-// uint48 max = 2^48 - 1 = 281,474,976,710,655
-// Seed from current time so it survives restarts without collision,
-// then increment atomically — never use Date.now() directly to avoid
-// same-millisecond duplicates when multiple bots run concurrently.
-const UINT48_MAX = BigInt(281_474_976_710_655);
-let _clientOrderCounter = BigInt(Date.now() % Number(UINT48_MAX));
-
-function nextClientOrderIndex(): number {
-  _clientOrderCounter = (_clientOrderCounter + 1n) % (UINT48_MAX + 1n);
-  return Number(_clientOrderCounter);
-}
-
-// ─── PER-KEY NONCE MANAGER (BUG-L-003) ──────────────────────────────────────
-// Prevents nonce race conditions when concurrent bots share the same API key.
-// Guarantees serial nonce acquisition per (network:accountIndex:apiKeyIndex) key.
-// Concurrent calls chain onto each other — only one fetches from API at a time.
-const _nonceChain = new Map<string, Promise<number>>();
-const _nonceValue = new Map<string, number>();
-const _nonceVersion = new Map<string, number>();
-
-// ORPHAN-CANCEL-SEQ-001: Global serial chain untuk orphan cancel per account+apikey.
-// Lighter exchange mewajibkan new_nonce = old_nonce + 1 (docs: signing-transactions.md).
-// Karena strategy yang berbeda bisa share apiKeyIndex yang sama, nonce allocation yang
-// sudah serial via acquireNonce belum cukup — sendTx dari dua strategy bisa tetap
-// interleave dan tiba out-of-order di sequencer.
-// Chain ini memastikan acquire+send tiap orphan cancel adalah atomic: strategy berikutnya
-// baru bisa mulai setelah strategy sebelumnya selesai kirim ke exchange.
-const _orphanCancelChain = new Map<string, Promise<void>>();
-
-function enqueueOrphanCancel(
-  accountIndex: number,
-  apiKeyIndex: number,
-  network: Network,
-  task: () => Promise<void>
-): Promise<void> {
-  const key = `${network}:${accountIndex}:${apiKeyIndex}`;
-  const prev = _orphanCancelChain.get(key) ?? Promise.resolve();
-  const next = prev.then(task, task); // lanjut meski prev gagal, tiap task punya error handler sendiri
-  _orphanCancelChain.set(key, next);
-  return next;
-}
-
-async function acquireNonce(
-  accountIndex: number,
-  apiKeyIndex: number,
-  network: Network,
-  count: number = 1
-): Promise<number> {
-  const key = `${network}:${accountIndex}:${apiKeyIndex}`;
-  const myVersion = _nonceVersion.get(key) ?? 0;
-  const prevChain = _nonceChain.get(key) ?? Promise.resolve(0);
-
-  const nextChain: Promise<number> = prevChain.then(
-    async () => {
-      const cached = _nonceValue.get(key);
-      if (cached !== undefined) {
-        _nonceValue.set(key, cached + count);
-        return cached;
-      }
-      const nonce = await getNextNonce(accountIndex, apiKeyIndex, network);
-      // Only write to cache if not invalidated while this fetch was in-flight
-      if ((_nonceVersion.get(key) ?? 0) === myVersion) {
-        _nonceValue.set(key, nonce + count);
-      }
-      return nonce;
-    },
-    async () => {
-      // Previous acquisition failed — re-fetch fresh nonce from API
-      const nonce = await getNextNonce(accountIndex, apiKeyIndex, network);
-      if ((_nonceVersion.get(key) ?? 0) === myVersion) {
-        _nonceValue.set(key, nonce + count);
-      }
-      return nonce;
-    }
-  );
-
-  _nonceChain.set(key, nextChain);
-  return nextChain;
-}
-
-function invalidateNonceCache(accountIndex: number, apiKeyIndex: number, network: Network): void {
-  const key = `${network}:${accountIndex}:${apiKeyIndex}`;
-  // NONCE-RACE-001 FIX: Jangan hapus _nonceChain saat invalidasi.
-  // Sebelumnya: _nonceChain.delete(key) → caller baru mulai dari Promise.resolve(0), TIDAK menunggu
-  // in-flight promise yang sedang memanggil getNextNonce. Kedua caller (in-flight lama + baru) bisa
-  // memanggil getNextNonce secara concurrent dan mendapat nonce yang sama → collision di sequencer.
-  //
-  // Fix: hapus hanya cached VALUE (_nonceValue), biarkan chain tetap ada.
-  // Caller baru akan chain setelah in-flight promise selesai (bukan dari Promise.resolve(0)).
-  // Setelah in-flight selesai: cache sudah didelete dan version-nya berbeda → caller baru
-  // masuk ke success/error handler dan memanggil getNextNonce dengan benar setelah in-flight selesai.
-  // Version bump tetap diperlukan untuk mencegah in-flight lama menulis nonce stale ke cache.
-  _nonceValue.delete(key);
-  _nonceVersion.set(key, (_nonceVersion.get(key) ?? 0) + 1);
-}
-
-function shouldInvalidateNonce(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return (
-    (err instanceof Error && err.name === "AbortError") ||
-    msg.includes("timeout") ||
-    msg.includes("ECONNREFUSED") ||
-    msg.includes("ENOTFOUND") ||
-    msg.toLowerCase().includes("nonce") ||
-    msg.includes("HTTP 400")
-  );
-}
+// Nonce chain, clientOrderIndex counter, orphan cancel chain → nonceManager.ts
+// (AUDIT-NONCE-001 + AUDIT-COI-001: shared dengan lighterFrArbEngine agar tidak collision)
 
 // MARGIN-LOOP-001 FIX: Deteksi apakah order dibatalkan sequencer karena alasan margin.
 // Sumber: docs data-structures-constants-and-errors.md — Order Status constants & OrderExecution struct.
@@ -420,12 +315,17 @@ async function updateStrategyStatsAtomic(
                / (total_sold + ${size.toFixed(8)}::numeric)
         END,
         realized_pnl      = realized_pnl + CASE
-          WHEN avg_buy_price > 0
+          WHEN ${mode} != 'short' AND avg_buy_price > 0
           THEN (${size.toFixed(8)}::numeric * (${price.toFixed(8)}::numeric - avg_buy_price))
           ELSE 0
         END
       WHERE id = ${strategyId}
     `);
+    // AUDIT-PNL-001: Kondisi ditambah mode != 'short'.
+    // SHORT grid: SELL = membuka posisi short (bukan menutup long) → tidak realize PnL.
+    // PnL saat tutup short dihitung di BUY path ketika order fill (avg_sell_price formula).
+    // Tanpa guard: jika avg_buy_price > 0 (sisa dari sesi sebelumnya), SELL di mode SHORT
+    // secara salah menambahkan size*(price-avg_buy_price) ke realized_pnl setiap order.
   }
 }
 
@@ -686,8 +586,7 @@ async function executeLiveOrder(params: {
 
   // Wait for pending orphan cancels on the same account+apikey to complete their sends
   // before submitting this order — prevents nonce out-of-order delivery at startup.
-  const _orphanKey = `${network}:${accountIndex}:${apiKeyIndex}`;
-  await (_orphanCancelChain.get(_orphanKey) ?? Promise.resolve()).catch(() => {});
+  await waitForOrphanCancels(accountIndex, apiKeyIndex, network).catch(() => {});
 
   let sendTxResult: Awaited<ReturnType<typeof sendTx>>;
   try {

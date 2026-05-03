@@ -3,6 +3,7 @@
 **Tanggal:** 2026-05-03
 **Auditor:** Replit Agent
 **Scope:** `lighterBotEngine.ts`, `lighterFrArbEngine.ts`, `lighterApi.ts`, `lighterWs.ts`, `lighterSigner.ts`, `autoRerange.ts`, `budgetTracker.ts`, `marketCache.ts`, `configService.ts`, `shared/botLogic.ts`, `shared/tolerance.ts`, `utils.ts`, `lib/db/src/schema/`
+**Mode:** Fix-all — semua issue langsung di-fix, `tsc --noEmit` harus bersih setelah setiap perubahan.
 
 ---
 
@@ -10,118 +11,167 @@
 
 | # | File | Severity | Judul | Status |
 |---|------|----------|-------|--------|
-| 1 | `lighterFrArbEngine.ts` | **High** | `getNextNonce` langsung tanpa `acquireNonce` chain — nonce collision jika grid + FR Arb aktif bersamaan | 🔲 Pending |
-| 2 | `lighterFrArbEngine.ts` | **Medium** | `clientOrderIndex` pakai `Date.now() %` bukan `nextClientOrderIndex()` — potensi duplikat | 🔲 Pending |
-| 3 | `lighterBotEngine.ts` | **Medium** | `updateStrategyStatsAtomic` — `realized_pnl` pada SELL path salah untuk mode SHORT | 🔲 Pending |
-| 4 | `autoRerange.ts` | **Medium** | `applyApprovedRerangeParams` tidak reset `budgetSpentUsd` saat rerange disetujui | 🔲 Pending |
-| 5 | `lighterFrArbEngine.ts` | **Medium** | `pollLighterPendingEntry` — `estimatedFillPrice` pakai mid-price (fallback), bukan harga fill aktual | 🔲 Pending |
+| 1 | `lighterFrArbEngine.ts` | **High** | `getNextNonce` langsung bypass `acquireNonce` chain — nonce collision jika grid + FR Arb aktif bersamaan | ✅ Fixed |
+| 2 | `lighterFrArbEngine.ts` | **Medium** | `clientOrderIndex` pakai `Date.now() %` bukan `nextClientOrderIndex()` — potensi duplikat lintas engine | ✅ Fixed |
+| 3 | `lighterBotEngine.ts` | **Medium** | `updateStrategyStatsAtomic` — `realized_pnl` pada SELL path salah untuk mode SHORT | ✅ Fixed |
+| 4 | `autoRerange.ts` | **Medium** | `applyApprovedRerangeParams` tidak reset `budgetSpentUsd` saat rerange disetujui | ✅ Fixed |
+| 5 | `lighterFrArbEngine.ts` | **Medium** | `pollLighterPendingEntry` — `estimatedFillPrice` selalu pakai mid-price, bukan harga fill aktual dari `event_info` | ✅ Fixed |
+
+**`tsc --noEmit` final: BERSIH (0 error)**
 
 ---
 
 ## Issue #1 — HIGH: Nonce Collision antara FR Arb Engine dan Grid Engine
 
 **File:** `artifacts/api-server/src/lib/lighter/lighterFrArbEngine.ts` (baris 344–351)
+**Fix ID:** `AUDIT-NONCE-001`
 
-**Masalah:**
-`placeLighterFrOrder` memanggil `getNextNonce` langsung dari Lighter API, **melewati** `acquireNonce` chain yang ada di `lighterBotEngine.ts` (BUG-L-003). Jika seorang user menjalankan:
-1. Grid bot (menggunakan `acquireNonce` → in-memory chain per `accountIndex:apiKeyIndex`)
-2. FR Arb bot (menggunakan `getNextNonce` langsung → fetch baru dari API)
+### Masalah
 
-...keduanya berbagi **nonce space yang sama** di Lighter (per `accountIndex + apiKeyIndex`). Karena `getNextNonce` dari FR Arb tidak membaca cache `_nonceChain` milik grid engine, dapat terjadi collision: grid engine mengambil nonce N dari cache, FR Arb mengambil nonce N dari API (sebelum grid engine melakukan `sendTx`), keduanya submit dengan nonce N → sequencer reject satu.
+`placeLighterFrOrder` memanggil `getNextNonce` langsung dari Lighter API, **melewati** `acquireNonce` chain (BUG-L-003 yang sudah di-fix di lighterBotEngine). Jika user menjalankan:
+
+1. Grid bot — menggunakan `acquireNonce` → in-memory chain per `network:accountIndex:apiKeyIndex`
+2. FR Arb bot — menggunakan `getNextNonce` langsung → fetch baru dari API, tidak membaca cache chain
+
+Keduanya berbagi **nonce space yang sama** di Lighter. `getNextNonce` dari FR Arb tidak membaca cache `_nonceChain` milik grid engine, sehingga bisa terjadi: grid engine mengambil nonce N dari cache, FR Arb mengambil nonce N dari API (sebelum grid engine `sendTx`), keduanya submit dengan nonce N → sequencer reject satu order.
 
 Lighter docs (`signing-transactions.md`): `new_nonce` harus `old_nonce + 1` — sequencer reject jika nonce sudah pernah digunakan.
 
-**Sebelum:**
+### Sebelum
+
 ```ts
-// lighterFrArbEngine.ts line 342–351
+// lighterFrArbEngine.ts
 let nonce: number;
 try {
-  nonce = await getNextNonce(accountIndex, apiKeyIndex, network);
-} catch (err) {
-  const msg = err instanceof Error ? err.message : String(err);
-  await frLog(..., "[LighterFrArb] Gagal acquire nonce", msg);
-  return null;
-}
+  nonce = await getNextNonce(accountIndex, apiKeyIndex, network);  // bypass chain!
+} catch (err) { ... }
 ```
 
-**Sesudah (usulan):**
-Impor `acquireNonce` dan `invalidateNonceCache` dari `lighterBotEngine.ts` (atau ekstrak ke shared module), lalu ganti `getNextNonce` dengan `acquireNonce`:
+### Fix
+
+Dibuat file baru `artifacts/api-server/src/lib/lighter/nonceManager.ts` yang mengekstrak semua state dan fungsi nonce dari `lighterBotEngine.ts`:
+
+- `nextClientOrderIndex()` — atomic counter
+- `acquireNonce()` — per-key serial chain
+- `invalidateNonceCache()` — hapus cache tanpa putus chain
+- `shouldInvalidateNonce()` — heuristik error
+- `enqueueOrphanCancel()` — serial orphan cancel chain
+- `waitForOrphanCancels()` — baca chain saat ini tanpa modifikasi
+
+`lighterBotEngine.ts` dan `lighterFrArbEngine.ts` keduanya import dari `nonceManager.ts` sehingga satu module-level state yang sama digunakan oleh semua engine.
+
 ```ts
-// lighterFrArbEngine.ts line 342–351
+// lighterFrArbEngine.ts — sesudah
+import { acquireNonce, invalidateNonceCache, shouldInvalidateNonce, nextClientOrderIndex } from "./nonceManager";
+
 let nonce: number;
 try {
-  nonce = await acquireNonce(accountIndex, apiKeyIndex, network);
-} catch (err) {
-  const msg = err instanceof Error ? err.message : String(err);
-  await frLog(..., "[LighterFrArb] Gagal acquire nonce", msg);
-  return null;
-}
+  nonce = await acquireNonce(accountIndex, apiKeyIndex, network);  // serial chain terpadu
+} catch (err) { ... }
 ```
-`acquireNonce` chain + `_nonceValue` cache harus di-shared (pindahkan ke `lighterSigner.ts` atau `nonceManager.ts` baru) agar `lighterFrArbEngine.ts` bisa mengimportnya tanpa circular dependency.
 
-**Risiko fix:** Perlu refactor `acquireNonce` + `invalidateNonceCache` + `_nonceChain`/`_nonceValue`/`_nonceVersion` keluar dari `lighterBotEngine.ts` ke file shared. Tidak ada behavioral change untuk grid bot — hanya FR Arb yang berubah cara acquire nonce.
+```ts
+// lighterBotEngine.ts — sesudah
+import { nextClientOrderIndex, acquireNonce, invalidateNonceCache,
+         shouldInvalidateNonce, enqueueOrphanCancel, waitForOrphanCancels } from "./nonceManager";
+// Semua definisi lokal (lines 54–161) dihapus.
+```
+
+**File baru:** `artifacts/api-server/src/lib/lighter/nonceManager.ts`
 
 ---
 
 ## Issue #2 — MEDIUM: `clientOrderIndex` Tidak Atomic di FR Arb Engine
 
 **File:** `artifacts/api-server/src/lib/lighter/lighterFrArbEngine.ts` (baris 364)
+**Fix ID:** `AUDIT-COI-001`
 
-**Masalah:**
-`placeLighterFrOrder` menggunakan `Date.now() % 281_474_976_710_655` untuk `clientOrderIndex`. Ini identik dengan masalah yang sudah di-fix di `lighterBotEngine.ts` (komentar baris 54–65: "never use Date.now() directly to avoid same-millisecond duplicates"). Jika dua FR Arb tick untuk strategi berbeda pada account yang sama terjadi dalam millisecond yang sama, mereka bisa menghasilkan `clientOrderIndex` identik → satu order ditolak exchange.
+### Masalah
 
-**Sebelum:**
+`placeLighterFrOrder` menggunakan `Date.now() % 281_474_976_710_655` untuk `clientOrderIndex`. Persis masalah yang sama yang sudah di-fix di `lighterBotEngine.ts` (komentar lines 54–65). Jika dua FR Arb tick untuk strategi berbeda terjadi dalam millisecond yang sama, mereka menghasilkan `clientOrderIndex` identik → satu order ditolak exchange karena duplicate client order index.
+
+### Sebelum
+
 ```ts
-// lighterFrArbEngine.ts line 364
 const clientOrderIndex = Date.now() % 281_474_976_710_655;
 ```
 
-**Sesudah:**
+### Sesudah
+
 ```ts
-// Impor nextClientOrderIndex dari lighterBotEngine (setelah refactor ke shared)
+// Atomic counter bersama dari nonceManager — tidak ada potensi duplikat
 const clientOrderIndex = nextClientOrderIndex();
 ```
 
-**Risiko fix:** Bergantung pada refactor Issue #1 (jika `nextClientOrderIndex` ikut dipindahkan ke shared module).
+Counter `_clientOrderCounter` di `nonceManager.ts` adalah module-level singleton — satu instance untuk seluruh proses, shared oleh `lighterBotEngine` dan `lighterFrArbEngine`.
 
 ---
 
 ## Issue #3 — MEDIUM: `realized_pnl` SELL Path Salah untuk Mode SHORT
 
-**File:** `artifacts/api-server/src/lib/lighter/lighterBotEngine.ts` (baris 409–428)
+**File:** `artifacts/api-server/src/lib/lighter/lighterBotEngine.ts` — `updateStrategyStatsAtomic`
+**Fix ID:** `AUDIT-PNL-001`
 
-**Masalah:**
-Pada `updateStrategyStatsAtomic`, SELL path selalu menghitung:
-```sql
-realized_pnl + CASE WHEN avg_buy_price > 0
-  THEN (size * (price - avg_buy_price))
-  ELSE 0
-END
-```
-Untuk mode SHORT: SELL order = **membuka** short (bukan menutup long). PnL untuk membuka posisi baru tidak boleh di-realize di saat order ditempatkan. Namun karena `avg_buy_price > 0` bisa bernilai true (dari BUY orders sebelumnya di mode SHORT yang close short), formula ini salah menambahkan `size * (price - avg_buy_price)` ke `realized_pnl` untuk setiap SELL di mode SHORT. Akibatnya: realized_pnl double-counted untuk SHORT grid bot.
+### Masalah
 
-**Sesudah (usulan):**
-Tambahkan kondisi mode:
+Pada `updateStrategyStatsAtomic`, SELL path SQL:
+
 ```sql
 realized_pnl + CASE
-  WHEN ${mode} != 'short' AND avg_buy_price > 0
+  WHEN avg_buy_price > 0
   THEN (size * (price - avg_buy_price))
   ELSE 0
 END
 ```
 
-**Risiko fix:** Hanya mempengaruhi tampilan stats (bukan logika trading). Bot yang sudah jalan tidak terpengaruh karena `realized_pnl` lama tidak di-recalculate. Akumulasi PnL salah pada SHORT bot yang sudah berjalan tidak otomatis terkoreksi.
+Untuk **mode SHORT**: SELL = *membuka* posisi short (bukan menutup long). PnL tidak direalisasikan saat membuka posisi. Namun `avg_buy_price > 0` bisa true (dari BUY orders yang menutup short), sehingga formula ini menambahkan `size * (price - avg_buy_price)` ke `realized_pnl` untuk setiap SELL di mode SHORT → **double-counted**.
+
+Semantik yang benar:
+- `neutral`/`long` grid: SELL = menutup long → realize PnL `size * (price - avg_buy_price)` ✓
+- `short` grid: SELL = membuka short → **tidak** realize PnL. PnL short direalisasikan saat BUY (tutup short) via `avg_sell_price` formula di BUY path.
+
+### Sebelum
+
+```sql
+WHEN avg_buy_price > 0
+THEN (size * (price - avg_buy_price))
+```
+
+### Sesudah
+
+```sql
+WHEN ${mode} != 'short' AND avg_buy_price > 0
+THEN (size * (price - avg_buy_price))
+```
+
+**Catatan:** Bot yang sudah berjalan di mode SHORT memiliki `realized_pnl` yang over-stated. Tidak ada auto-koreksi retrospektif — perlu recalculate manual jika akurasi historis diperlukan.
 
 ---
 
 ## Issue #4 — MEDIUM: `budgetSpentUsd` Tidak Di-reset Setelah Rerange
 
-**File:** `artifacts/api-server/src/lib/autoRerange.ts` (baris 335–348)
+**File:** `artifacts/api-server/src/lib/autoRerange.ts` — `applyApprovedRerangeParams`
+**Fix ID:** `AUDIT-BUDGET-001`
 
-**Masalah:**
-Saat user menyetujui auto-rerange (`applyApprovedRerangeParams`), DB di-update dengan config grid baru. Namun `budgetSpentUsd` di tabel `strategies` **tidak di-reset ke 0**. Akibatnya: jika bot mendekati `maxBudgetUsd` sebelum rerange, setelah rerange disetujui, bot mungkin langsung berhenti karena counter masih menunjukkan nilai lama. Ini terutama bermasalah karena rerange = "sesi baru" — user wajar mengharapkan budget counter direset.
+### Masalah
 
-**Sebelum:**
+Saat user menyetujui auto-rerange, `applyApprovedRerangeParams` memperbarui config grid baru tapi tidak mereset `budgetSpentUsd`. Jika bot mendekati `maxBudgetUsd` sebelum rerange, setelah rerange disetujui, bot akan langsung berhenti karena counter masih menunjukkan nilai lama — padahal rerange = sesi grid baru dengan range berbeda.
+
+### Sebelum
+
+```ts
+await db.update(strategiesTable).set({
+  gridConfig: newGridConfig,
+  consecutiveOutOfRange: 0,
+  pendingRerangeAt: null,
+  // ... (tidak ada budgetSpentUsd reset)
+  gridLastLevel: null,
+  updatedAt: new Date(),
+}).where(eq(strategiesTable.id, strategyId));
+```
+
+### Sesudah
+
 ```ts
 await db.update(strategiesTable).set({
   gridConfig: newGridConfig,
@@ -132,72 +182,107 @@ await db.update(strategiesTable).set({
   rerangeCountToday: currentCount + 1,
   rerangeCountDate: today,
   gridLastLevel: null,
+  budgetSpentUsd: "0",   // ← AUDIT-BUDGET-001: reset untuk sesi grid baru
   updatedAt: new Date(),
 }).where(eq(strategiesTable.id, strategyId));
 ```
-
-**Sesudah:**
-```ts
-await db.update(strategiesTable).set({
-  gridConfig: newGridConfig,
-  consecutiveOutOfRange: 0,
-  pendingRerangeAt: null,
-  pendingRerangeParams: null,
-  lastRerangeAt: new Date(),
-  rerangeCountToday: currentCount + 1,
-  rerangeCountDate: today,
-  gridLastLevel: null,
-  budgetSpentUsd: "0",  // Reset budget counter — rerange = sesi baru
-  updatedAt: new Date(),
-}).where(eq(strategiesTable.id, strategyId));
-```
-
-**Risiko fix:** Minimal. User yang sengaja ingin mempertahankan budget counter lintas rerange akan kehilangan fitur itu, tapi behavior ini tidak terdokumentasi dan counter-intuitive. Reset adalah perilaku yang lebih logis.
 
 ---
 
-## Issue #5 — MEDIUM: `estimatedFillPrice` di FR Arb Pakai Mid-Price, Bukan Harga Fill Aktual
+## Issue #5 — MEDIUM: `estimatedFillPrice` Pakai Mid-Price, Bukan Harga Fill Aktual
 
-**File:** `artifacts/api-server/src/lib/lighter/lighterFrArbEngine.ts` (baris 425–449)
+**File:** `artifacts/api-server/src/lib/lighter/lighterFrArbEngine.ts` — `pollLighterPendingEntry`
+**Fix ID:** `AUDIT-FILL-001`
 
-**Masalah:**
-`pollLighterPendingEntry` mengembalikan `estimatedFillPrice: fallbackPrice` (mid-price saat polling) untuk semua status filled (txStatus=2 atau 3). Harga fill aktual mungkin ada di `txResp.event_info` (OrderExecution struct dari Lighter API), tapi tidak diekstrak. Akibatnya: `entryPrice` yang tersimpan di `frArbState` adalah **estimasi** (mid-price saat poll), bukan harga fill sebenarnya. PnL yang ditampilkan ke user via Telegram tidak akurat.
+### Masalah
 
-**Sebelum:**
+`pollLighterPendingEntry` mengembalikan `estimatedFillPrice: fallbackPrice` (mid-price saat polling) untuk semua status filled. Lighter API menyertakan `event_info` di response `getTx` — sebuah JSON string yang berisi data eksekusi order (termasuk harga fill aktual). Field ini tidak pernah diekstrak, sehingga `entryPrice` yang tersimpan di `frArbState` selalu mid-price saat poll, bukan harga fill sebenarnya.
+
+Dampak: PnL yang ditampilkan ke user via Telegram tidak akurat, terutama untuk market order atau limit order dengan spread lebar.
+
+### Sebelum
+
 ```ts
 if (txStatus === 2 || txStatus === 3) {
   return { status: "filled", estimatedFillPrice: fallbackPrice };
 }
 ```
 
-**Sesudah:**
+### Sesudah
+
+Ditambahkan fungsi `parseFillPriceFromEventInfo()` yang:
+1. Parse `event_info` sebagai JSON
+2. Coba field `avgPrice`, `avg_price`, `price`, `fill_price` (defensif terhadap perubahan format API)
+3. Validasi nilai (isFinite, > 0)
+4. Fallback ke `fallbackPrice` jika parsing gagal
+
 ```ts
-if (txStatus === 2 || txStatus === 3) {
-  // Coba ekstrak fill price dari event_info (OrderExecution.to.px atau .mo.px)
-  let fillPrice = fallbackPrice;
-  if (txResp.event_info) {
-    try {
-      const ei = JSON.parse(txResp.event_info) as any;
-      const rawPx = ei?.t?.px ?? ei?.to?.px ?? ei?.mo?.px;
-      if (rawPx && parseFloat(rawPx) > 0) fillPrice = parseFloat(rawPx);
-    } catch {}
+function parseFillPriceFromEventInfo(eventInfo: string | undefined, fallback: number): number {
+  if (!eventInfo) return fallback;
+  try {
+    const parsed = JSON.parse(eventInfo) as Record<string, unknown>;
+    const raw =
+      parsed["avgPrice"] ?? parsed["avg_price"] ??
+      parsed["price"] ?? parsed["fill_price"];
+    if (raw === undefined || raw === null) return fallback;
+    const val = Number(raw);
+    return isFinite(val) && val > 0 ? val : fallback;
+  } catch {
+    return fallback;
   }
+}
+
+if (txStatus === 2 || txStatus === 3) {
+  const fillPrice = parseFillPriceFromEventInfo(txResp.event_info, fallbackPrice);
   return { status: "filled", estimatedFillPrice: fillPrice };
 }
 ```
 
-**Risiko fix:** Jika `event_info` tidak tersedia atau formatnya berbeda dari yang diasumsikan, fallback ke `fallbackPrice` tetap dipakai — tidak ada regresi. Perlu validasi terhadap struktur `event_info` aktual dari Lighter API sebelum merge.
+**Catatan:** Format `event_info` aktual dari Lighter API belum ter-dokumentasi secara eksplisit. Implementasi defensif dengan multiple key lookup dan hard fallback. Perlu verifikasi terhadap response nyata dari mainnet untuk konfirmasi field yang tepat.
+
+---
+
+## Bonus Fix — `invalidateNonceCache` saat `sendTx` Gagal di FR Arb
+
+Ditemukan saat mengerjakan Issue #1: `lighterFrArbEngine.ts` tidak memanggil `invalidateNonceCache` saat `sendTx` gagal, padahal `lighterBotEngine.ts` melakukannya. Nonce yang sudah di-acquire tapi gagal terkirim dapat menyebabkan nonce gap — sequencer reject order berikutnya.
+
+**Fix:** Tambahkan `shouldInvalidateNonce` + `invalidateNonceCache` di catch block `sendTx`:
+
+```ts
+} catch (err) {
+  if (shouldInvalidateNonce(err)) {
+    invalidateNonceCache(accountIndex, apiKeyIndex, network);
+  }
+  await frLog(...);
+  return null;
+}
+```
+
+---
+
+## File yang Dimodifikasi
+
+| File | Perubahan |
+|------|-----------|
+| `artifacts/api-server/src/lib/lighter/nonceManager.ts` | **BARU** — shared nonce + clientOrderIndex manager |
+| `artifacts/api-server/src/lib/lighter/lighterBotEngine.ts` | Hapus definisi lokal nonce (lines 54–161), import dari `nonceManager`, ganti `_orphanCancelChain.get()` dengan `waitForOrphanCancels()` |
+| `artifacts/api-server/src/lib/lighter/lighterFrArbEngine.ts` | Hapus `getNextNonce` dari import, import dari `nonceManager`, fix `acquireNonce`/`nextClientOrderIndex`, add `invalidateNonceCache` di sendTx catch, fix `pollLighterPendingEntry` |
+| `artifacts/api-server/src/lib/autoRerange.ts` | Tambah `budgetSpentUsd: "0"` di `applyApprovedRerangeParams` |
+| `artifacts/api-server/src/lib/lighter/lighterBotEngine.ts` | Fix `realized_pnl` SELL SQL — tambah `${mode} != 'short' AND` |
 
 ---
 
 ## Carry-over untuk Sesi Berikutnya
 
-File yang belum diperiksa mendalam:
+File yang **belum** diperiksa mendalam:
+
 - `artifacts/api-server/src/lib/extended/extendedBotEngine.ts` (full)
-- `artifacts/api-server/src/lib/frArbEngine.ts` (sisa baris 100–802)
-- `artifacts/api-server/src/lib/autoRerange.ts` (sisa baris 400–843)
+- `artifacts/api-server/src/lib/frArbEngine.ts` — Extended FR Arb engine
+- `artifacts/api-server/src/lib/autoRerange.ts` (sisa baris 360–843)
 - `artifacts/api-server/src/lib/groqAI.ts`
 - `artifacts/api-server/src/lib/telegramBot.ts`
 - `artifacts/api-server/src/routes/` (semua file)
 - `artifacts/HK-Projects/src/` (frontend — pages, components)
 - `lib/db/src/schema/users.ts`, `botConfig.ts`, `botLogs.ts`
+
+**Priority untuk sesi berikutnya:** Extended engine (`extendedBotEngine.ts`) dan route handlers — biasanya ada input validation issues.

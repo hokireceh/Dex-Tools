@@ -30,7 +30,6 @@ import { sendMessageToUser } from "../telegramBot";
 import {
   getFundingRates,
   getOrderBookDepth,
-  getNextNonce,
   sendTx,
   toBaseAmount,
   toPriceInt,
@@ -40,6 +39,7 @@ import {
 } from "./lighterApi";
 import { getMarkets } from "./marketCache";
 import { initSigner, signCreateOrder } from "./lighterSigner";
+import { acquireNonce, invalidateNonceCache, shouldInvalidateNonce, nextClientOrderIndex } from "./nonceManager";
 
 Decimal.set({ precision: 20, rounding: Decimal.ROUND_HALF_UP });
 
@@ -339,10 +339,12 @@ async function placeLighterFrOrder(
   const priceInt = toPriceInt(executionPrice.toNumber(), priceDecimals);
   const url = getBaseUrl(network);
 
-  // Acquire nonce — FR Arb menempatkan maks 1 order per tick, cukup fetch fresh
+  // AUDIT-NONCE-001: Pakai acquireNonce (chain bersama dengan lighterBotEngine)
+  // bukan getNextNonce langsung, agar tidak terjadi nonce collision jika user
+  // menjalankan grid bot + FR Arb bot bersamaan pada accountIndex+apiKeyIndex yang sama.
   let nonce: number;
   try {
-    nonce = await getNextNonce(accountIndex, apiKeyIndex, network);
+    nonce = await acquireNonce(accountIndex, apiKeyIndex, network);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     await frLog(userId, strategyId, strategyName, "error",
@@ -360,8 +362,10 @@ async function placeLighterFrOrder(
     return null;
   }
 
-  // Sign order
-  const clientOrderIndex = Date.now() % 281_474_976_710_655;
+  // AUDIT-COI-001: Pakai nextClientOrderIndex() (atomic counter bersama nonceManager)
+  // bukan Date.now() % UINT48_MAX agar tidak ada potensi duplikat clientOrderIndex
+  // lintas engine jika dua bot aktif bersamaan pada millisecond yang sama.
+  const clientOrderIndex = nextClientOrderIndex();
   const signResult = signCreateOrder({
     marketIndex,
     clientOrderIndex,
@@ -390,6 +394,12 @@ async function placeLighterFrOrder(
     sendResult = await sendTx(signResult.txType, signResult.txInfo, network, true);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
+    // Invalidate nonce cache on sendTx failure agar nonce berikutnya di-fetch ulang dari API.
+    // Nonce yang sudah di-acquire tapi gagal terkirim bisa menyebabkan nonce gap jika tidak
+    // di-invalidasi — sequencer akan reject order berikutnya karena nonce tidak sequential.
+    if (shouldInvalidateNonce(err)) {
+      invalidateNonceCache(accountIndex, apiKeyIndex, network);
+    }
     await frLog(userId, strategyId, strategyName, "error",
       `[LighterFrArb] sendTx gagal: ${msg}`,
       `side: ${side} | qty: ${qtyStr} | price: ${executionPrice.toFixed(priceDecimals)}`);
@@ -422,6 +432,30 @@ interface PendingEntryResult {
   estimatedFillPrice: number;
 }
 
+// AUDIT-FILL-001: Parse fill price dari event_info jika tersedia.
+// Lighter API mengembalikan event_info sebagai JSON string (format: CreateOrderExecution)
+// yang berisi avgPrice (harga fill aktual). Format referensi dari docs:
+// data-structures-constants-and-errors.md → CreateOrderExecution struct.
+// Jika event_info tidak bisa di-parse, fallback ke mid-price saat poll (fallbackPrice).
+function parseFillPriceFromEventInfo(eventInfo: string | undefined, fallback: number): number {
+  if (!eventInfo) return fallback;
+  try {
+    const parsed = JSON.parse(eventInfo) as Record<string, unknown>;
+    // Field bisa berupa "avgPrice", "avg_price", atau "price" tergantung versi API Lighter.
+    // Coba semua kemungkinan key secara defensif.
+    const raw =
+      parsed["avgPrice"] ??
+      parsed["avg_price"] ??
+      parsed["price"] ??
+      parsed["fill_price"];
+    if (raw === undefined || raw === null) return fallback;
+    const val = Number(raw);
+    return isFinite(val) && val > 0 ? val : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 async function pollLighterPendingEntry(
   txHash: string,
   fallbackPrice: number,
@@ -435,8 +469,12 @@ async function pollLighterPendingEntry(
   const txStatus = txResp.status;
 
   if (txStatus === 2 || txStatus === 3) {
-    // Executed atau Committed — fill terkonfirmasi
-    return { status: "filled", estimatedFillPrice: fallbackPrice };
+    // Executed atau Committed — fill terkonfirmasi.
+    // AUDIT-FILL-001: Ekstrak fill price aktual dari event_info jika ada,
+    // bukan selalu pakai mid-price saat poll (fallbackPrice) yang bisa berbeda
+    // signifikan dari harga fill sebenarnya untuk order market / large limit order.
+    const fillPrice = parseFillPriceFromEventInfo(txResp.event_info, fallbackPrice);
+    return { status: "filled", estimatedFillPrice: fillPrice };
   }
 
   if (txStatus === 0) {
